@@ -1,0 +1,23 @@
+name: validate
+on: [push, pull_request]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install promtool & amtool
+        run: |
+          curl -sL https://github.com/prometheus/prometheus/releases/download/v2.54.1/prometheus-2.54.1.linux-amd64.tar.gz | tar xz
+          curl -sL https://github.com/prometheus/alertmanager/releases/download/v0.27.0/alertmanager-0.27.0.linux-amd64.tar.gz | tar xz
+          echo "$PWD/prometheus-2.54.1.linux-amd64" >> $GITHUB_PATH
+          echo "$PWD/alertmanager-0.27.0.linux-amd64" >> $GITHUB_PATH
+      - name: Check Prometheus rules
+        run: promtool check rules prometheus/rules/*.yml
+      - name: Check Alertmanager config
+        run: amtool check-config alertmanager/alertmanager.yml
+      - name: Unit-test alert rules
+        run: promtool test rules prometheus/tests/alerts_test.yml
+      - name: Dashboards are up to date
+        run: |
+          python3 scripts/generate_dashboards.py
+          git diff --exit-code grafana/dashboards
