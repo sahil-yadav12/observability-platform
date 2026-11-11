@@ -1,0 +1,220 @@
+# Alerting rules.
+# Every alert carries:
+#   severity  -> routing in Alertmanager (warning | critical)
+#   resource  -> which signal is affected (used by inhibition rules)
+# "for:" durations are deliberately short so the demo is easy to trigger;
+# lengthen them for real environments to reduce flapping.
+groups:
+  # ------------------------------------------------------------ availability
+  - name: availability
+    rules:
+      - alert: Watchdog
+        expr: vector(1)
+        labels:
+          severity: none
+          resource: pipeline
+        annotations:
+          summary: Alerting pipeline heartbeat
+          description: Always firing. If this stops arriving, the alerting pipeline is broken.
+
+      - alert: InstanceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          resource: availability
+        annotations:
+          summary: "{{ $labels.job }} target {{ $labels.instance }} is down"
+          description: "Prometheus failed to scrape {{ $labels.instance }} (job {{ $labels.job }}) for more than 1 minute."
+          runbook_url: https://example.com/runbooks/instance-down
+
+  # ------------------------------------------------------------ host saturation
+  - name: host-saturation
+    rules:
+      - alert: HostHighCpu
+        expr: instance:node_cpu_utilisation:ratio > 0.80
+        for: 5m
+        labels: {severity: warning, resource: cpu}
+        annotations:
+          summary: "High CPU on {{ $labels.instance }}"
+          description: "CPU utilisation is {{ $value | humanizePercentage }} (threshold 80%)."
+
+      - alert: HostCriticalCpu
+        expr: instance:node_cpu_utilisation:ratio > 0.95
+        for: 5m
+        labels: {severity: critical, resource: cpu}
+        annotations:
+          summary: "CPU saturated on {{ $labels.instance }}"
+          description: "CPU utilisation is {{ $value | humanizePercentage }} (threshold 95%)."
+
+      - alert: HostHighLoad
+        expr: |
+          node_load5 / on (instance) count by (instance) (node_cpu_seconds_total{mode="idle"}) > 1.5
+        for: 10m
+        labels: {severity: warning, resource: load}
+        annotations:
+          summary: "High load average on {{ $labels.instance }}"
+          description: "5m load is {{ $value | printf \"%.2f\" }}x the number of CPU cores."
+
+      - alert: HostHighMemory
+        expr: instance:node_memory_utilisation:ratio > 0.85
+        for: 5m
+        labels: {severity: warning, resource: memory}
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory utilisation is {{ $value | humanizePercentage }} (threshold 85%)."
+
+      - alert: HostCriticalMemory
+        expr: instance:node_memory_utilisation:ratio > 0.95
+        for: 2m
+        labels: {severity: critical, resource: memory}
+        annotations:
+          summary: "Memory nearly exhausted on {{ $labels.instance }}"
+          description: "Memory utilisation is {{ $value | humanizePercentage }} (threshold 95%). OOM kills are likely."
+
+      - alert: HostDiskSpaceLow
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}) < 0.15
+          and node_filesystem_readonly == 0
+        for: 5m
+        labels: {severity: warning, resource: disk}
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} below 15% free on {{ $labels.instance }}"
+          description: "Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }}."
+
+      - alert: HostDiskSpaceCritical
+        expr: |
+          (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}) < 0.05
+          and node_filesystem_readonly == 0
+        for: 2m
+        labels: {severity: critical, resource: disk}
+        annotations:
+          summary: "Disk {{ $labels.mountpoint }} below 5% free on {{ $labels.instance }}"
+          description: "Only {{ $value | humanizePercentage }} free on {{ $labels.mountpoint }}."
+
+      - alert: HostDiskWillFillIn24h
+        expr: |
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}[6h], 24 * 3600) < 0
+          and node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"}
+            / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|ramfs|fuse.*"} < 0.40
+        for: 30m
+        labels: {severity: warning, resource: disk}
+        annotations:
+          summary: "{{ $labels.mountpoint }} on {{ $labels.instance }} predicted to fill within 24h"
+          description: "Linear extrapolation of the last 6h shows free space reaching zero in under 24 hours."
+
+      - alert: HostNetworkErrors
+        expr: |
+          sum by (instance, device) (rate(node_network_receive_errs_total{device!~"lo|veth.*"}[5m]) + rate(node_network_transmit_errs_total{device!~"lo|veth.*"}[5m]))
+          / sum by (instance, device) (rate(node_network_receive_packets_total{device!~"lo|veth.*"}[5m]) + rate(node_network_transmit_packets_total{device!~"lo|veth.*"}[5m]))
+          > 0.01
+        for: 5m
+        labels: {severity: warning, resource: network}
+        annotations:
+          summary: "Network errors on {{ $labels.instance }} ({{ $labels.device }})"
+          description: "{{ $value | humanizePercentage }} of packets are errored."
+
+      - alert: HostNetworkSaturation
+        expr: |
+          sum by (instance, device) (rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|br-.*"}[5m]) + rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|br-.*"}[5m])) > 100e6
+        for: 5m
+        labels: {severity: warning, resource: network}
+        annotations:
+          summary: "High network throughput on {{ $labels.instance }} ({{ $labels.device }})"
+          description: "Combined RX+TX is {{ $value | humanize1024 }}B/s (threshold ~100 MB/s)."
+
+  # ------------------------------------------------------------ service reliability (golden signals)
+  - name: service-reliability
+    rules:
+      - alert: ServiceHighErrorRate
+        expr: job:http_error_ratio:rate5m > 0.02
+        for: 3m
+        labels: {severity: warning, resource: errors}
+        annotations:
+          summary: "Elevated 5xx rate for {{ $labels.job }}"
+          description: "Error ratio is {{ $value | humanizePercentage }} over 5m (threshold 2%)."
+
+      # SLO = 99.5% availability -> error budget = 0.5%.
+      # Fast burn: budget consumed 14.4x faster than allowed (both windows must agree).
+      - alert: ServiceErrorBudgetFastBurn
+        expr: |
+          job:http_error_ratio:rate5m > (14.4 * 0.005)
+          and job:http_error_ratio:rate1h > (14.4 * 0.005)
+        for: 2m
+        labels: {severity: critical, resource: errors}
+        annotations:
+          summary: "{{ $labels.job }} is burning its error budget very fast"
+          description: "Error ratio {{ $value | humanizePercentage }} (5m) exceeds 14.4x the 0.5% budget. At this rate the monthly budget is gone in ~2 days."
+
+      - alert: ServiceErrorBudgetSlowBurn
+        expr: |
+          job:http_error_ratio:rate30m > (6 * 0.005)
+          and job:http_error_ratio:rate6h > (6 * 0.005)
+        for: 15m
+        labels: {severity: warning, resource: errors}
+        annotations:
+          summary: "{{ $labels.job }} is steadily burning its error budget"
+          description: "Error ratio {{ $value | humanizePercentage }} (30m) exceeds 6x the 0.5% budget."
+
+      - alert: ServiceHighLatencyP95
+        expr: job:http_request_duration_seconds:p95 > 0.5
+        for: 2m
+        labels: {severity: warning, resource: latency}
+        annotations:
+          summary: "p95 latency high for {{ $labels.job }}"
+          description: "p95 latency is {{ $value | humanizeDuration }} (threshold 500ms)."
+
+      - alert: ServiceCriticalLatencyP99
+        expr: job:http_request_duration_seconds:p99 > 1
+        for: 2m
+        labels: {severity: critical, resource: latency}
+        annotations:
+          summary: "p99 latency critical for {{ $labels.job }}"
+          description: "p99 latency is {{ $value | humanizeDuration }} (threshold 1s)."
+
+      - alert: ServiceNoTraffic
+        expr: job:http_requests:rate5m == 0
+        for: 5m
+        labels: {severity: warning, resource: traffic}
+        annotations:
+          summary: "{{ $labels.job }} is receiving no traffic"
+          description: "Request rate has been zero for 5 minutes."
+
+      - alert: ServiceHighConcurrency
+        expr: sum by (job) (http_requests_in_flight) > 50
+        for: 2m
+        labels: {severity: warning, resource: saturation}
+        annotations:
+          summary: "High in-flight request count for {{ $labels.job }}"
+          description: "{{ $value }} requests in flight (threshold 50) - the service may be saturated."
+
+      - alert: ContainerHighMemory
+        expr: |
+          (container_memory_working_set_bytes{name!=""}
+            / (container_spec_memory_limit_bytes{name!=""} > 0)) > 0.90
+        for: 5m
+        labels: {severity: warning, resource: memory}
+        annotations:
+          summary: "Container {{ $labels.name }} near its memory limit"
+          description: "Working set is {{ $value | humanizePercentage }} of the container limit."
+
+  # ------------------------------------------------------------ monitoring the monitors
+  - name: monitoring-self
+    rules:
+      - alert: PrometheusNotConnectedToAlertmanager
+        expr: prometheus_notifications_alertmanagers_discovered < 1
+        for: 2m
+        labels: {severity: critical, resource: pipeline}
+        annotations:
+          summary: Prometheus cannot see any Alertmanager
+          description: Alerts will not be delivered until this is resolved.
+
+      - alert: PrometheusRuleEvaluationFailures
+        expr: increase(prometheus_rule_evaluation_failures_total[5m]) > 0
+        for: 1m
+        labels: {severity: warning, resource: pipeline}
+        annotations:
+          summary: Prometheus rule evaluations are failing
+          description: "{{ $value }} rule evaluation failures in the last 5 minutes."

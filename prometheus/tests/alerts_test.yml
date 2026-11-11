@@ -1,0 +1,88 @@
+# Run with: make test-rules   (promtool test rules)
+rule_files:
+  - ../rules/recording.yml
+  - ../rules/alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: InstanceDown fires after target is unreachable for 1m
+    interval: 1m
+    input_series:
+      - series: 'up{job="node", instance="node-exporter:9100"}'
+        values: '1 1 0 0 0 0'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: InstanceDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: InstanceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              resource: availability
+              job: node
+              instance: node-exporter:9100
+            exp_annotations:
+              summary: "node target node-exporter:9100 is down"
+              description: "Prometheus failed to scrape node-exporter:9100 (job node) for more than 1 minute."
+              runbook_url: https://example.com/runbooks/instance-down
+
+  - name: High 5xx ratio triggers ServiceHighErrorRate
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="demo-app", instance="demo-app:8000", method="GET", endpoint="/api/orders", status="200"}'
+        values: '0+60x30'
+      - series: 'http_requests_total{job="demo-app", instance="demo-app:8000", method="GET", endpoint="/api/orders", status="500"}'
+        values: '0+20x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ServiceHighErrorRate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              resource: errors
+              job: demo-app
+            exp_annotations:
+              summary: "Elevated 5xx rate for demo-app"
+              description: "Error ratio is 25% over 5m (threshold 2%)."
+
+  - name: Healthy traffic stays quiet
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{job="demo-app", instance="demo-app:8000", method="GET", endpoint="/api/users", status="200"}'
+        values: '0+100x30'
+      - series: 'http_requests_total{job="demo-app", instance="demo-app:8000", method="GET", endpoint="/api/users", status="500"}'
+        values: '0+0x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ServiceHighErrorRate
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ServiceErrorBudgetFastBurn
+        exp_alerts: []
+
+  - name: Disk below 5 percent free is critical
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{instance="node-exporter:9100", job="node", mountpoint="/", device="/dev/sda1", fstype="ext4"}'
+        values: '4e9x10'
+      - series: 'node_filesystem_size_bytes{instance="node-exporter:9100", job="node", mountpoint="/", device="/dev/sda1", fstype="ext4"}'
+        values: '100e9x10'
+      - series: 'node_filesystem_readonly{instance="node-exporter:9100", job="node", mountpoint="/", device="/dev/sda1", fstype="ext4"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: HostDiskSpaceCritical
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              resource: disk
+              instance: node-exporter:9100
+              job: node
+              mountpoint: /
+              device: /dev/sda1
+              fstype: ext4
+            exp_annotations:
+              summary: "Disk / below 5% free on node-exporter:9100"
+              description: "Only 4% free on /."

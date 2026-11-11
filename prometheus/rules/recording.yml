@@ -1,0 +1,40 @@
+# Recording rules: pre-compute expensive expressions once so dashboards and
+# alerts stay fast and consistent. Naming follows level:metric:operations.
+groups:
+  - name: host-recording
+    interval: 15s
+    rules:
+      - record: instance:node_cpu_utilisation:ratio
+        expr: 1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))
+
+      - record: instance:node_memory_utilisation:ratio
+        expr: 1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+
+  - name: service-recording
+    interval: 15s
+    rules:
+      - record: job:http_requests:rate5m
+        expr: sum by (job) (rate(http_requests_total[5m]))
+
+      # Error ratio over several windows -> used for multi-window burn-rate alerts
+      - record: job:http_error_ratio:rate5m
+        expr: |
+          sum by (job) (rate(http_requests_total{status=~"5.."}[5m]))
+          / sum by (job) (rate(http_requests_total[5m]))
+      - record: job:http_error_ratio:rate30m
+        expr: |
+          sum by (job) (rate(http_requests_total{status=~"5.."}[30m]))
+          / sum by (job) (rate(http_requests_total[30m]))
+      - record: job:http_error_ratio:rate1h
+        expr: |
+          sum by (job) (rate(http_requests_total{status=~"5.."}[1h]))
+          / sum by (job) (rate(http_requests_total[1h]))
+      - record: job:http_error_ratio:rate6h
+        expr: |
+          sum by (job) (rate(http_requests_total{status=~"5.."}[6h]))
+          / sum by (job) (rate(http_requests_total[6h]))
+
+      - record: job:http_request_duration_seconds:p95
+        expr: histogram_quantile(0.95, sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))
+      - record: job:http_request_duration_seconds:p99
+        expr: histogram_quantile(0.99, sum by (job, le) (rate(http_request_duration_seconds_bucket[5m])))
